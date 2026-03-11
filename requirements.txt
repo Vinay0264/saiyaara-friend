@@ -1,0 +1,10 @@
+# --- Phase 1 (Core) ---
+fastapi
+uvicorn
+groq
+python-dotenv
+
+# --- Phase 2 (Memory & Web Search) ---
+requests
+beautifulsoup4
+ddgs

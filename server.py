@@ -8,14 +8,14 @@ import os
 import json
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from brain import think
+from brain import process, think
 
 # ── App Setup ─────────────────────────────────────────────────────────────────
 app = FastAPI(title="SAIYAARA")
@@ -46,18 +46,36 @@ async def health():
         "time": datetime.now().strftime("%I:%M %p")
     }
 
+# ── Opening greeting based on time ───────────────────────────────────────────
+async def get_opening_greeting() -> str:
+    hour = datetime.now().hour
+    if hour >= 22 or hour < 5:
+        prompt = "Vinay just opened his laptop very late at night. Greet him with genuine concern. Short, warm, real. No more than 2 sentences."
+    elif hour >= 17:
+        prompt = "Vinay just opened his laptop in the evening. Greet him naturally, check in on his day. Short and warm. No more than 2 sentences."
+    elif hour >= 12:
+        prompt = "Vinay just opened his laptop in the afternoon. Greet him casually and naturally. One sentence."
+    else:
+        prompt = "Vinay just opened his laptop in the morning. Greet him with energy, wish him a good day. One sentence."
+    return await think(prompt, [])
+
 # ── WebSocket ─────────────────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    global conversation_history  # ← fix: tells Python this is the module-level list
+    global conversation_history
 
     await websocket.accept()
     print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Connected")
 
+    # Send connection confirmation
     await websocket.send_json({
         "type": "connected",
         "message": "SAIYAARA is online."
     })
+
+    # Send opening greeting
+    opening = await get_opening_greeting()
+    await websocket.send_json({"type": "response", "text": opening})
 
     try:
         while True:
@@ -81,20 +99,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] Vinay: {text}")
                 await websocket.send_json({"type": "thinking"})
 
-                reply = await think(text, conversation_history)
+                reply = await process(text, conversation_history)
                 response = {"type": "response", "text": reply}
 
                 # Update conversation history
-                if True:
-                    conversation_history.append({"role": "user", "content": text})
+                conversation_history.append({"role": "user", "content": text})
+                spoken = response.get("text", "")
+                if spoken:
+                    conversation_history.append({"role": "assistant", "content": spoken})
 
-                    spoken = response.get("text", "")
-                    if spoken:
-                        conversation_history.append({"role": "assistant", "content": spoken})
-
-                    # Trim to last 20 exchanges
-                    if len(conversation_history) > 40:
-                        conversation_history = conversation_history[-40:]
+                # Trim to last 20 exchanges
+                if len(conversation_history) > 40:
+                    conversation_history = conversation_history[-40:]
 
                 # Terminal log
                 log_text = response.get("text") or response["type"]
