@@ -415,79 +415,207 @@
   function setTalking(active){document.body.classList.toggle("talking",active);}
   function setThinkingState(active){document.body.classList.toggle("thinking-state",active);}
 
-  /* ═══ TTS — FRIDAY-style voice tuning ═══
-     FRIDAY in the MCU: confident, warm, clear American female.
-     Best match on Windows Chrome: Microsoft Aria (neural) or Jenny.
-     Key tuning: rate 1.08 (not too fast), pitch 1.0 (natural, not raised),
-     slight warmth. Avoid Zira — too robotic.
-  ═══ */
-  let ttsVoice=null;
+  /* ═══ TTS ═══
+     Browser: Chrome or Edge detected automatically.
+     Chrome voices load async — we wait for them before speaking anything.
+     Greeting is queued and spoken only after voices are confirmed ready.
 
-  /* Priority order — Aria sounds closest to FRIDAY */
-  const VP=[
-    "Microsoft Aria",        // Neural — best FRIDAY match, warm + confident
-    "Microsoft Jenny",       // Neural — clear, natural American female
-    "Microsoft Michelle",    // Neural — warm American female
-    "Microsoft Amanda",      // Good fallback
+     Chrome  → Microsoft Aria / Jenny (neural, warm) — rate 0.92, pitch 1.0
+     Edge    → Microsoft Aria / Jenny (neural, warm) — rate 1.08, pitch 1.0
+
+     Aria is the best available neural voice on Windows Chrome/Edge.
+     Natural, warm, clear — closest to a real human female voice.
+  ═══ */
+
+  const isChrome = /Chrome/.test(navigator.userAgent) && !/Edg/.test(navigator.userAgent);
+  const isEdge   = /Edg/.test(navigator.userAgent);
+
+  // TTS rate tuned per browser — Chrome renders neural voices faster than Edge
+  const TTS_RATE  = isChrome ? 1.0 : 1.08;  // 1.0 = natural pace on Chrome neural voices
+  const TTS_PITCH = 1.0;
+
+  let ttsVoice      = null;
+  let voicesReady   = false;
+  let pendingSpeech = null;  // queued text waiting for voices to load
+
+  // Chrome/Edge voice priority — neural voices first, fallbacks after
+  const VOICE_PRIORITY = [
+    "Microsoft Aria",         // Neural — warm, confident, natural. Best choice.
+    "Microsoft Jenny",        // Neural — clear American female. Strong fallback.
+    "Microsoft Michelle",     // Neural — warm American female.
+    "Microsoft Amanda",       // Good non-neural fallback.
     "Google UK English Female",
-    "Microsoft Zira",        // Last resort — too robotic but better than male
-    "Microsoft David",
+    "Microsoft Zira",
     "Google US English",
   ];
 
-  function pickVoice(){
-    const all=window.speechSynthesis.getVoices();
-    if(!all.length)return;
-    for(const kw of VP){
-      const m=all.find(v=>v.name.includes(kw));
-      if(m){ttsVoice=m;break;}
+  function pickVoice() {
+    const all = window.speechSynthesis.getVoices();
+    if (!all.length) return;  // not ready yet — onvoiceschanged will fire again
+
+    for (const kw of VOICE_PRIORITY) {
+      const match = all.find(v => v.name.includes(kw));
+      if (match) { ttsVoice = match; break; }
     }
-    if(!ttsVoice)ttsVoice=all.find(v=>v.lang.startsWith("en-US")||v.lang.startsWith("en"))||all[0]||null;
+
+    // Last resort — any English voice
+    if (!ttsVoice) {
+      ttsVoice = all.find(v => v.lang.startsWith("en-US"))
+              || all.find(v => v.lang.startsWith("en"))
+              || all[0]
+              || null;
+    }
+
+    voicesReady = true;
     updateVoiceStatus();
+
+    // If a greeting was queued before voices were ready — speak it now
+    if (pendingSpeech) {
+      const text = pendingSpeech;
+      pendingSpeech = null;
+      speak(text);
+    }
   }
-  window.speechSynthesis.onvoiceschanged=pickVoice;
+
+  // Chrome fires onvoiceschanged when voices finish loading
+  // Call pickVoice() immediately too — sometimes voices are already cached
+  window.speechSynthesis.onvoiceschanged = pickVoice;
   pickVoice();
 
-  function updateVoiceStatus(){
-    const el=document.getElementById("voice-status");
-    if(!ttsVoice){el.textContent="Not found";return;}
-    el.textContent=ttsVoice.name.replace(/^Microsoft\s+/i,"").replace(/\s+-\s+.+$/,"").trim();
+  // Safety net — if voices don't load in 2s, try again once
+  // Handles edge cases where onvoiceschanged never fires (rare in Chrome)
+  setTimeout(() => {
+    if (!voicesReady) pickVoice();
+  }, 2000);
+
+  function updateVoiceStatus() {
+    const el = document.getElementById("voice-status");
+    if (!ttsVoice) { el.textContent = "Loading..."; return; }
+    el.textContent = ttsVoice.name
+      .replace(/^Microsoft\s+/i, "")
+      .replace(/\s+-\s+.+$/, "")
+      .trim();
   }
 
-  function speak(text){
+  function prepareForSpeech(text) {
+    let s = text;
+    // "SAIYAARA" in all-caps gets spelled out letter by letter by TTS engines
+    // Replace with title case — engine reads it as a natural word
+    s = s.replace(/\bSAIYAARA\b/g, "Saiyaara");
+    // Code blocks — skip entirely, don't read raw code
+    s = s.replace(/```[\s\S]*?```/g, "");
+    // Inline code — just read the word without backticks
+    s = s.replace(/`([^`]+)`/g, "$1");
+    // Headers — read the heading text, add a natural pause after
+    s = s.replace(/^#{1,4}\s+(.+)$/gm, "$1. ");
+    // Bold/italic — strip symbols, keep words
+    s = s.replace(/\*\*(.+?)\*\*/g, "$1");
+    s = s.replace(/\*(.+?)\*/g, "$1");
+    s = s.replace(/__(.+?)__/g, "$1");
+    s = s.replace(/_(.+?)_/g, "$1");
+    // Bullet points — replace * or - at line start with a comma pause
+    s = s.replace(/^[\*\-•]\s+/gm, ", ");
+    // Numbered lists — read number naturally
+    s = s.replace(/^\d+\.\s+/gm, ", ");
+    // Horizontal rules — skip
+    s = s.replace(/^---+$/gm, "");
+    // Emojis — strip, display keeps them
+    s = s.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "");
+    // Remaining markdown symbols
+    s = s.replace(/[#>|]/g, "");
+    // Collapse multiple spaces/newlines into single space
+    s = s.replace(/\n+/g, " ").replace(/\s{2,}/g, " ").trim();
+    // Fix doubled commas from list replacement
+    s = s.replace(/,\s*,/g, ",");
+    return s;
+  }
+
+  function speak(text) {
+    // If voices not ready yet — queue and speak once ready
+    if (!voicesReady || !ttsVoice) {
+      pendingSpeech = text;
+      return;
+    }
+
     window.speechSynthesis.cancel();
-    // Strip markdown symbols — don't speak * _ ` # > characters
-    let clean=text.replace(/[*_`#>]/g,"");
-    // Strip emojis — voice skips them cleanly, chat still shows them
-    clean=clean.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu,"");
-    const chunks=clean.match(/[^.!?।\n]+[.!?।\n]*/g)||[clean];
+
+    const clean = prepareForSpeech(text);
+    if (!clean) return;
+
+    // ONE single utterance — no chunking.
+    // Chrome pauses noticeably between queued utterances (known browser bug).
+    // Single utterance = no pauses, immediate start, natural flow.
     setTalking(true);
-    chunks.forEach((chunk,i)=>{
-      const c=chunk.trim();if(!c)return;
-      const utt=new SpeechSynthesisUtterance(c);
-      utt.voice=ttsVoice;
-      /* Chrome TTS tuning:
-         rate 0.95 — calm, natural, not rushed
-         pitch 1.0  — completely natural, no chipmunk effect
-         volume 1.0 — full presence */
-      // Chrome and Edge have different speech speeds — detect and apply correct rate
-      const isChrome = /Chrome/.test(navigator.userAgent) && !/Edg/.test(navigator.userAgent);
-      utt.rate  = isChrome ? 0.95 : 1.08;  // Chrome=0.95 (slower), Edge=1.08 (original)
-      utt.pitch = 1.0;
-      utt.volume = 1.0;
-      utt.lang = "en-US";
-      if(i===chunks.length-1)utt.onend=()=>setTalking(false);
-      window.speechSynthesis.speak(utt);
-    });
+    const utt   = new SpeechSynthesisUtterance(clean);
+    utt.voice   = ttsVoice;
+    utt.rate    = TTS_RATE;
+    utt.pitch   = TTS_PITCH;
+    utt.volume  = 1.0;
+    utt.lang    = "en-US";
+    utt.onend   = () => setTalking(false);
+    utt.onerror = () => setTalking(false);
+    window.speechSynthesis.speak(utt);
   }
 
   /* ═══ CLOCK ═══ */
   function tick(){const n=new Date();const t=n.toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit",hour12:true});const d=n.toLocaleDateString("en-IN",{weekday:"short",day:"numeric",month:"short"});document.getElementById("clock").innerHTML=`${t}<span class="date-part"> · ${d}</span>`;}
   tick();setInterval(tick,1000);
 
-  /* ═══ GREETINGS ═══ */
-  const G={morning:["Good morning, sir ☀️","Morning! Did you sleep well, sir?","Rise and shine, sir. I've been waiting."],afternoon:["Good afternoon, sir.","Hey sir, how's the day going?","Afternoon already — time flies, doesn't it?"],evening:["Good evening, sir 🌙","Evening! Long day? Tell me everything.","Hey, you're still at it. I like that."],night:["Still up, sir? 🌌","Late night energy — I'm here for it.","Night owl mode, sir. Let's do this."]};
-  function greet(){const p=G[getTOD()];const el=document.getElementById("greeting");if(el)el.textContent=p[Math.floor(Math.random()*p.length)];}
+  /* ═══ GREETINGS ═══
+     Large pool per time-of-day. Random pick — never feels repetitive.
+     No questions. Just presence. SAIYAARA is already here.
+  ═══ */
+  const G = {
+    morning: [
+      "Morning, sir.",
+      "You're up early, sir.",
+      "Morning. Let's make it count.",
+      "Rise and shine, sir.",
+      "Good morning, sir.",
+      "Morning — coffee first or straight to work?",
+      "Another day, sir. Make it yours.",
+    ],
+    afternoon: [
+      "Afternoon, sir.",
+      "Hey, sir.",
+      "Still going strong, sir.",
+      "Good afternoon, sir.",
+      "Afternoon. What are we working on?",
+      "You're back, sir.",
+      "Afternoon already — where did the morning go?",
+    ],
+    evening: [
+      "Evening, sir.",
+      "Good evening, sir.",
+      "Long day, sir?",
+      "Evening. Still at it.",
+      "Hey, sir. How was the day?",
+      "Evening — winding down or just starting?",
+      "Good to see you, sir.",
+    ],
+    night: [
+      "Still up, sir.",
+      "Late night again, sir.",
+      "Sir, it's late.",
+      "Night owl mode.",
+      "You should sleep, sir. But I'm here.",
+      "Late night. What's on your mind?",
+      "Sir. Sleep exists.",
+    ]
+  };
+
+  // Track last greeting index to avoid immediate repeats
+  let _lastGreetIdx = -1;
+
+  function greet() {
+    const pool = G[getTOD()];
+    let idx;
+    do { idx = Math.floor(Math.random() * pool.length); }
+    while (pool.length > 1 && idx === _lastGreetIdx);
+    _lastGreetIdx = idx;
+    const el = document.getElementById("greeting");
+    if (el) el.textContent = pool[idx];
+  }
 
   /* ═══ STATUS ═══ */
   function setStatus(state,label){
