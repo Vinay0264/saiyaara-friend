@@ -456,21 +456,26 @@
 
   function speak(text){
     window.speechSynthesis.cancel();
-    const clean=text.replace(/[*_`#>]/g,"");
+    // Strip markdown symbols — don't speak * _ ` # > characters
+    let clean=text.replace(/[*_`#>]/g,"");
+    // Strip emojis — voice skips them cleanly, chat still shows them
+    clean=clean.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu,"");
     const chunks=clean.match(/[^.!?।\n]+[.!?।\n]*/g)||[clean];
     setTalking(true);
     chunks.forEach((chunk,i)=>{
       const c=chunk.trim();if(!c)return;
       const utt=new SpeechSynthesisUtterance(c);
       utt.voice=ttsVoice;
-      /* FRIDAY tuning:
-         rate 1.08 — slightly brisk, not sluggish, not rushed
-         pitch 1.0 — completely natural, no chipmunk effect
+      /* Chrome TTS tuning:
+         rate 0.95 — calm, natural, not rushed
+         pitch 1.0  — completely natural, no chipmunk effect
          volume 1.0 — full presence */
-      utt.rate=1.08;
-      utt.pitch=1.0;
-      utt.volume=1.0;
-      utt.lang="en-US";
+      // Chrome and Edge have different speech speeds — detect and apply correct rate
+      const isChrome = /Chrome/.test(navigator.userAgent) && !/Edg/.test(navigator.userAgent);
+      utt.rate  = isChrome ? 0.95 : 1.08;  // Chrome=0.95 (slower), Edge=1.08 (original)
+      utt.pitch = 1.0;
+      utt.volume = 1.0;
+      utt.lang = "en-US";
       if(i===chunks.length-1)utt.onend=()=>setTalking(false);
       window.speechSynthesis.speak(utt);
     });
